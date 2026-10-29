@@ -2,8 +2,6 @@
 
 This project implements a streaming stock-data pipeline using Amazon Kinesis, AWS Lambda, Amazon S3, AWS Glue, Amazon Athena, Amazon DynamoDB, and Amazon SNS.
 
-For the complete first-person build narrative, architecture explanation, testing evidence, interview preparation, rebuild instructions, and safe cleanup procedure, see [PROJECT-INTERVIEW-GUIDE.md](PROJECT-INTERVIEW-GUIDE.md).
-
 ## Current progress
 
 - Step 1: Amazon Kinesis Data Stream — complete
