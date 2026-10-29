@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step 3: S3 raw archive and DynamoDB cleaned-data store'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: stock-market-analytics
+
+  Environment:
+    Type: String
+    Default: development
+    AllowedValues: [development, staging, production]
+
+  DataRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    Description: Days to retain demo stock data
+
+Resources:
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-raw-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteDemoRawData
+            Status: Enabled
+            ExpirationInDays: !Ref DataRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  RawDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RawDataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt RawDataBucket.Arn
+              - !Sub '${RawDataBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  CleanedStockDataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub '${ProjectName}-cleaned-${Environment}'
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: symbol
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: symbol
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  RawBucketName:
+    Description: S3 bucket for compressed raw stock events
+    Value: !Ref RawDataBucket
+    Export:
+      Name: !Sub '${ProjectName}-RawBucketName-${Environment}'
+
+  RawBucketArn:
+    Value: !GetAtt RawDataBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-RawBucketArn-${Environment}'
+
+  CleanedTableName:
+    Description: DynamoDB table for cleaned stock records
+    Value: !Ref CleanedStockDataTable
+    Export:
+      Name: !Sub '${ProjectName}-CleanedTableName-${Environment}'
+
+  CleanedTableArn:
+    Value: !GetAtt CleanedStockDataTable.Arn
+    Export:
+      Name: !Sub '${ProjectName}-CleanedTableArn-${Environment}'
+
+  CleanedTableStreamArn:
+    Description: DynamoDB stream ARN reserved for the trend-analysis step
+    Value: !GetAtt CleanedStockDataTable.StreamArn
+    Export:
+      Name: !Sub '${ProjectName}-CleanedTableStreamArn-${Environment}'

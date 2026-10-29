@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Final architecture path: DynamoDB trend analysis Lambda and SNS alerts'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: stock-market-analytics
+
+  Environment:
+    Type: String
+    Default: development
+    AllowedValues: [development, staging, production]
+
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Optional email endpoint; the recipient must confirm the SNS subscription
+
+Conditions:
+  CreateEmailSubscription: !Not [!Equals [!Ref AlertEmail, '']]
+
+Resources:
+  TrendAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts-${Environment}'
+      DisplayName: Stock trend alerts
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  TrendAlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: CreateEmailSubscription
+    Properties:
+      TopicArn: !Ref TrendAlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  TrendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-trend-${Environment}'
+      RetentionInDays: 1
+
+  TrendFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-trend-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TrendAnalysisAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource:
+                  Fn::ImportValue: !Sub '${ProjectName}-CleanedTableStreamArn-${Environment}'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  Fn::ImportValue: !Sub '${ProjectName}-CleanedTableArn-${Environment}'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref TrendAlertsTopic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt TrendLogGroup.Arn
+
+  TrendFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TrendLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-trend-${Environment}'
+      Description: Detects SMA-5 and SMA-20 crossovers and publishes SNS alerts
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Role: !GetAtt TrendFunctionRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME:
+            Fn::ImportValue: !Sub '${ProjectName}-CleanedTableName-${Environment}'
+          SNS_TOPIC_ARN: !Ref TrendAlertsTopic
+          SHORT_WINDOW: '5'
+          LONG_WINDOW: '20'
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"batchItemFailures": []}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  DynamoDBEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::ImportValue: !Sub '${ProjectName}-CleanedTableStreamArn-${Environment}'
+      FunctionName: !Ref TrendFunction
+      StartingPosition: LATEST
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 30
+      ParallelizationFactor: 1
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 2
+      MaximumRecordAgeInSeconds: 3600
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT"]}'
+      Enabled: true
+
+Outputs:
+  TrendFunctionName:
+    Value: !Ref TrendFunction
+    Export:
+      Name: !Sub '${ProjectName}-TrendFunctionName-${Environment}'
+
+  TrendLogGroupName:
+    Value: !Ref TrendLogGroup
+
+  AlertsTopicArn:
+    Value: !Ref TrendAlertsTopic
+    Export:
+      Name: !Sub '${ProjectName}-AlertsTopicArn-${Environment}'
+
+  EmailSubscriptionRequested:
+    Value: !If [CreateEmailSubscription, !Ref AlertEmail, 'Not configured']

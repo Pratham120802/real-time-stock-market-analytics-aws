@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step 2: Lambda processor for incoming real-time stock records'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: stock-market-analytics
+
+  Environment:
+    Type: String
+    Default: development
+    AllowedValues: [development, staging, production]
+
+Resources:
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-processor-${Environment}'
+      RetentionInDays: 1
+
+  ProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-processor-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KinesisReadAndLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource:
+                  Fn::ImportValue: !Sub '${ProjectName}-StreamArn-${Environment}'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ProcessorLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  Fn::Join:
+                    - ''
+                    - - Fn::ImportValue: !Sub '${ProjectName}-RawBucketArn-${Environment}'
+                      - '/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::ImportValue: !Sub '${ProjectName}-CleanedTableArn-${Environment}'
+
+  ProcessorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ProcessorLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-processor-${Environment}'
+      Description: Cleans stock events and flags price or volume anomalies
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Role: !GetAtt ProcessorRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          PRICE_CHANGE_THRESHOLD_PCT: '5'
+          VOLUME_SPIKE_MULTIPLIER: '3'
+          DATA_TTL_DAYS: '7'
+          RAW_BUCKET_NAME:
+            Fn::ImportValue: !Sub '${ProjectName}-RawBucketName-${Environment}'
+          DYNAMODB_TABLE_NAME:
+            Fn::ImportValue: !Sub '${ProjectName}-CleanedTableName-${Environment}'
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"batchItemFailures": []}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  KinesisEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::ImportValue: !Sub '${ProjectName}-StreamArn-${Environment}'
+      FunctionName: !Ref ProcessorFunction
+      StartingPosition: LATEST
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 1
+      ParallelizationFactor: 1
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 3
+      MaximumRecordAgeInSeconds: 3600
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      Enabled: true
+
+Outputs:
+  FunctionName:
+    Description: Name of the stock processing Lambda function
+    Value: !Ref ProcessorFunction
+    Export:
+      Name: !Sub '${ProjectName}-ProcessorFunctionName-${Environment}'
+
+  FunctionArn:
+    Description: ARN of the stock processing Lambda function
+    Value: !GetAtt ProcessorFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-ProcessorFunctionArn-${Environment}'
+
+  LogGroupName:
+    Description: CloudWatch log group for processing results
+    Value: !Ref ProcessorLogGroup

@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step 1: Kinesis Data Stream for real-time stock market ingestion'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: stock-market-analytics
+    Description: Project name used for resource naming
+
+  Environment:
+    Type: String
+    Default: development
+    AllowedValues:
+      - development
+      - staging
+      - production
+    Description: Deployment environment
+
+  RetentionPeriodHours:
+    Type: Number
+    Default: 24
+    MinValue: 24
+    MaxValue: 8760
+    Description: Number of hours records remain available in the stream
+
+  ShardCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Number of shards when using provisioned capacity
+
+Resources:
+  StockDataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub '${ProjectName}-stream-${Environment}'
+      ShardCount: !Ref ShardCount
+      RetentionPeriodHours: !Ref RetentionPeriodHours
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-stream-${Environment}'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Real-time stock market data ingestion
+
+Outputs:
+  StreamName:
+    Description: Name of the Kinesis data stream
+    Value: !Ref StockDataStream
+    Export:
+      Name: !Sub '${ProjectName}-StreamName-${Environment}'
+
+  StreamArn:
+    Description: ARN of the Kinesis data stream
+    Value: !GetAtt StockDataStream.Arn
+    Export:
+      Name: !Sub '${ProjectName}-StreamArn-${Environment}'
+
+  StreamMode:
+    Description: Capacity mode used by the stream
+    Value: PROVISIONED
+
+  ShardCount:
+    Description: Number of provisioned shards
+    Value: !Ref ShardCount

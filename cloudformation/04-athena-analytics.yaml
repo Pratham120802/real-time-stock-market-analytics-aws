@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step 4: Glue Data Catalog and Athena queries for historical stock data'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: stock-market-analytics
+
+  Environment:
+    Type: String
+    Default: development
+    AllowedValues: [development, staging, production]
+
+  ProjectionStartYear:
+    Type: Number
+    Default: 2026
+
+  ProjectionEndYear:
+    Type: Number
+    Default: 2035
+
+Resources:
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-athena-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteDemoQueryResults
+            Status: Enabled
+            ExpirationInDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  AthenaResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AthenaResultsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt AthenaResultsBucket.Arn
+              - !Sub '${AthenaResultsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  HistoricalDataDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub 'stock_market_analytics_${Environment}'
+        Description: Historical stock events archived by the real-time pipeline
+
+  RawStockEventsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref HistoricalDataDatabase
+      TableInput:
+        Name: raw_stock_events
+        Description: Gzip-compressed raw Kinesis stock events stored as NDJSON
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: gzip
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: !Sub '${ProjectionStartYear},${ProjectionEndYear}'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          projection.hour.type: integer
+          projection.hour.range: '0,23'
+          projection.hour.digits: '2'
+          storage.location.template:
+            Fn::Sub:
+              - 's3://${RawBucket}/raw/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/'
+              - RawBucket:
+                  Fn::ImportValue: !Sub '${ProjectName}-RawBucketName-${Environment}'
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+        StorageDescriptor:
+          Compressed: true
+          Location:
+            Fn::Sub:
+              - 's3://${RawBucket}/raw/'
+              - RawBucket:
+                  Fn::ImportValue: !Sub '${ProjectName}-RawBucketName-${Environment}'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'true'
+          Columns:
+            - Name: sequence_number
+              Type: string
+            - Name: payload
+              Type: 'struct<symbol:string,price:double,previous_close:double,volume:bigint,average_volume:double,timestamp:string,source:string>'
+
+  HistoricalQueriesWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}'
+      Description: Low-cost workgroup for partition-filtered historical stock queries
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        BytesScannedCutoffPerQuery: 10485760
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: false
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  RecentHistoricalEventsQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: recent-historical-stock-events
+      Description: Replace the partition values with the UTC date and hour to inspect archived events
+      Database: !Ref HistoricalDataDatabase
+      WorkGroup: !Ref HistoricalQueriesWorkGroup
+      QueryString: |
+        SELECT
+          payload.symbol AS symbol,
+          payload.price AS price,
+          payload.volume AS volume,
+          payload.timestamp AS event_timestamp,
+          payload.source AS source
+        FROM raw_stock_events
+        WHERE year = date_format(current_timestamp, '%Y')
+          AND month = date_format(current_timestamp, '%m')
+          AND day = date_format(current_timestamp, '%d')
+          AND hour = date_format(current_timestamp, '%H')
+        ORDER BY payload.timestamp DESC
+        LIMIT 20;
+
+Outputs:
+  AthenaDatabaseName:
+    Value: !Ref HistoricalDataDatabase
+    Export:
+      Name: !Sub '${ProjectName}-AthenaDatabaseName-${Environment}'
+
+  AthenaTableName:
+    Value: !Ref RawStockEventsTable
+
+  AthenaWorkGroupName:
+    Value: !Ref HistoricalQueriesWorkGroup
+    Export:
+      Name: !Sub '${ProjectName}-AthenaWorkGroupName-${Environment}'
+
+  AthenaResultsBucketName:
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: !Sub '${ProjectName}-AthenaResultsBucketName-${Environment}'
